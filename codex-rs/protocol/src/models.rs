@@ -854,7 +854,7 @@ pub enum ResponseItem {
         #[ts(optional)]
         id: Option<ResponseItemId>,
         summary: Vec<ReasoningItemReasoningSummary>,
-        #[serde(default, skip_serializing_if = "should_serialize_reasoning_content")]
+        #[serde(default, skip_serializing_if = "skip_serialize_reasoning_content")]
         #[ts(optional)]
         content: Option<Vec<ReasoningItemContent>>,
         encrypted_content: Option<String>,
@@ -1359,12 +1359,12 @@ fn render_command_prefix(prefix: &[String]) -> String {
     format!("[{tokens}]")
 }
 
-fn should_serialize_reasoning_content(content: &Option<Vec<ReasoningItemContent>>) -> bool {
+fn skip_serialize_reasoning_content(content: &Option<Vec<ReasoningItemContent>>) -> bool {
     match content {
         Some(content) => !content
             .iter()
             .any(|c| matches!(c, ReasoningItemContent::ReasoningText { .. })),
-        None => false,
+        None => true,
     }
 }
 
@@ -4051,6 +4051,147 @@ mod tests {
                 }
             }
             other => panic!("expected message response but got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn reasoning_without_content_omits_content_field() -> Result<()> {
+        let item = ResponseItem::Reasoning {
+            id: None,
+            summary: Vec::new(),
+            content: None,
+            encrypted_content: Some("encrypted".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(item)?,
+            serde_json::json!({
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": "encrypted",
+            })
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn reasoning_deserializes_legacy_text_without_replaying_it() -> Result<()> {
+        let persisted = serde_json::json!({
+            "type": "reasoning",
+            "summary": [],
+            "content": [{
+                "type": "text",
+                "text": "legacy reasoning",
+            }],
+            "encrypted_content": "encrypted",
+        });
+
+        let item: ResponseItem = serde_json::from_value(persisted)?;
+
+        assert_eq!(
+            item,
+            ResponseItem::Reasoning {
+                id: None,
+                summary: Vec::new(),
+                content: Some(vec![ReasoningItemContent::Text {
+                    text: "legacy reasoning".to_string(),
+                }]),
+                encrypted_content: Some("encrypted".to_string()),
+                internal_chat_message_metadata_passthrough: None,
+            }
+        );
+
+        assert_eq!(
+            serde_json::to_value(item)?,
+            serde_json::json!({
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": "encrypted",
+            })
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn reasoning_with_reasoning_text_serializes_content() -> Result<()> {
+        let item = ResponseItem::Reasoning {
+            id: None,
+            summary: Vec::new(),
+            content: Some(vec![ReasoningItemContent::ReasoningText {
+                text: "supported reasoning".to_string(),
+            }]),
+            encrypted_content: Some("encrypted".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(item)?,
+            serde_json::json!({
+                "type": "reasoning",
+                "summary": [],
+                "content": [{
+                    "type": "reasoning_text",
+                    "text": "supported reasoning",
+                }],
+                "encrypted_content": "encrypted",
+            })
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn reasoning_with_empty_content_omits_content_field() -> Result<()> {
+        let item = ResponseItem::Reasoning {
+            id: None,
+            summary: Vec::new(),
+            content: Some(Vec::new()),
+            encrypted_content: Some("encrypted".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(item)?,
+            serde_json::json!({
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": "encrypted",
+            })
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn reasoning_deserializes_omitted_and_null_content() -> Result<()> {
+        let expected = ResponseItem::Reasoning {
+            id: None,
+            summary: Vec::new(),
+            content: None,
+            encrypted_content: Some("encrypted".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        };
+
+        for value in [
+            serde_json::json!({
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": "encrypted",
+            }),
+            serde_json::json!({
+                "type": "reasoning",
+                "summary": [],
+                "content": null,
+                "encrypted_content": "encrypted",
+            }),
+        ] {
+            let item: ResponseItem = serde_json::from_value(value)?;
+            assert_eq!(&item, &expected);
         }
 
         Ok(())
