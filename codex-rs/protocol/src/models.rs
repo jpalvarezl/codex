@@ -731,12 +731,19 @@ pub enum ContentItem {
     OutputText {
         text: String,
         #[serde(default)]
-        annotations: Vec<Annotation>,
+        annotations: Vec<AnnotationCompatShim>,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(untagged)]
+pub enum AnnotationCompatShim {
+    Known(Annotation),
+    Unknown(serde_json::Value),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Annotation {
     FileCitation {
         file_id: String,
@@ -766,8 +773,6 @@ pub enum Annotation {
         #[ts(type = "number")]
         index: i64,
     },
-    #[serde(other)]
-    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
@@ -2366,6 +2371,7 @@ mod tests {
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: "still working".to_string(),
+                annotations: vec![],
             }],
             phase: Some(MessagePhase::Commentary),
         });
@@ -2377,6 +2383,7 @@ mod tests {
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: "still working".to_string(),
+                    annotations: vec![],
                 }],
                 phase: Some(MessagePhase::Commentary),
                 internal_chat_message_metadata_passthrough: None,
@@ -4137,6 +4144,234 @@ mod tests {
             }
             other => panic!("expected message response but got {other:?}"),
         }
+
+        Ok(())
+    }
+
+    fn output_text_message(annotations: Vec<AnnotationCompatShim>) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: "hello".to_string(),
+                annotations,
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    #[test]
+    fn output_text_empty_annotations_round_trip() -> Result<()> {
+        let json = serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": "hello",
+                "annotations": [],
+            }],
+        });
+
+        let item: ResponseItem = serde_json::from_value(json.clone())?;
+
+        assert_eq!(item, output_text_message(Vec::new()));
+        assert_eq!(serde_json::to_value(item)?, json);
+
+        Ok(())
+    }
+
+    #[test]
+    fn output_text_non_empty_annotations_round_trip() -> Result<()> {
+        let json = serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": "hello",
+                "annotations": [
+                    {
+                        "type": "file_citation",
+                        "file_id": "file-1",
+                        "filename": "notes.txt",
+                        "index": 4,
+                    },
+                    {
+                        "type": "url_citation",
+                        "start_index": 5,
+                        "end_index": 12,
+                        "title": "Example",
+                        "url": "https://example.com",
+                    },
+                    {
+                        "type": "container_file_citation",
+                        "container_id": "container-1",
+                        "start_index": 13,
+                        "end_index": 20,
+                        "file_id": "file-2",
+                        "filename": "report.txt",
+                    },
+                    {
+                        "type": "file_path",
+                        "file_id": "file-3",
+                        "index": 21,
+                    },
+                ],
+            }],
+        });
+
+        let expected = output_text_message(vec![
+            AnnotationCompatShim::Known(Annotation::FileCitation {
+                file_id: "file-1".to_string(),
+                filename: "notes.txt".to_string(),
+                index: 4,
+            }),
+            AnnotationCompatShim::Known(Annotation::UrlCitation {
+                start_index: 5,
+                end_index: 12,
+                title: "Example".to_string(),
+                url: "https://example.com".to_string(),
+            }),
+            AnnotationCompatShim::Known(Annotation::ContainerFileCitation {
+                container_id: "container-1".to_string(),
+                start_index: 13,
+                end_index: 20,
+                file_id: "file-2".to_string(),
+                filename: "report.txt".to_string(),
+            }),
+            AnnotationCompatShim::Known(Annotation::FilePath {
+                file_id: "file-3".to_string(),
+                index: 21,
+            }),
+        ]);
+
+        let item: ResponseItem = serde_json::from_value(json.clone())?;
+
+        assert_eq!(item, expected);
+        assert_eq!(serde_json::to_value(item)?, json);
+
+        Ok(())
+    }
+
+    #[test]
+    fn output_text_legacy_missing_annotations_replays_as_empty() -> Result<()> {
+        let legacy_json = serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": "hello",
+            }],
+        });
+
+        let expected_json = serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": "hello",
+                "annotations": [],
+            }],
+        });
+
+        let item: ResponseItem = serde_json::from_value(legacy_json)?;
+
+        assert_eq!(item, output_text_message(Vec::new()));
+        assert_eq!(serde_json::to_value(item)?, expected_json);
+
+        Ok(())
+    }
+
+    #[test]
+    fn output_text_null_annotations_are_rejected() {
+        let result = serde_json::from_value::<ResponseItem>(serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": "hello",
+                "annotations": null,
+            }],
+        }));
+
+        result.expect_err("output_text annotations must not be null");
+    }
+
+    #[test]
+    fn output_text_unknown_annotation_type_round_trips_unchanged() -> Result<()> {
+        let json = serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": "hello",
+                "annotations": [{
+                    "type": "future_citation",
+                    "source_id": "source-1",
+                    "page": 3,
+                    "metadata": {
+                        "section": "introduction",
+                    },
+                }],
+            }],
+        });
+
+        let item: ResponseItem = serde_json::from_value(json.clone())?;
+
+        assert_eq!(serde_json::to_value(item)?, json);
+
+        Ok(())
+    }
+
+    #[test]
+    fn output_text_known_annotation_extra_fields_round_trip() -> Result<()> {
+        let json = serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": "hello",
+                "annotations": [{
+                    "type": "url_citation",
+                    "start_index": 0,
+                    "end_index": 5,
+                    "title": "Example",
+                    "url": "https://example.com",
+                    "future_metadata": {
+                        "confidence": 0.98,
+                    },
+                }],
+            }],
+        });
+
+        let item: ResponseItem = serde_json::from_value(json.clone())?;
+
+        assert_eq!(serde_json::to_value(item)?, json);
+
+        Ok(())
+    }
+
+    #[test]
+    fn output_text_annotations_are_not_added_to_user_input() -> Result<()> {
+        let item = ResponseInputItem::Message {
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(item)?,
+            serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "hello",
+                }],
+            })
+        );
 
         Ok(())
     }
