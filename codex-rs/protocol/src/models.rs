@@ -730,7 +730,44 @@ pub enum ContentItem {
     },
     OutputText {
         text: String,
+        #[serde(default)]
+        annotations: Vec<Annotation>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Annotation {
+    FileCitation {
+        file_id: String,
+        filename: String,
+        #[ts(type = "number")] // following what I've seen in other places
+        index: i64,
+    },
+    UrlCitation {
+        #[ts(type = "number")]
+        end_index: i64,
+        #[ts(type = "number")]
+        start_index: i64,
+        title: String,
+        url: String,
+    },
+    ContainerFileCitation {
+        container_id: String,
+        #[ts(type = "number")]
+        start_index: i64,
+        #[ts(type = "number")]
+        end_index: i64,
+        file_id: String,
+        filename: String,
+    },
+    FilePath {
+        file_id: String,
+        #[ts(type = "number")]
+        index: i64,
+    },
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
